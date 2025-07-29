@@ -1,3 +1,25 @@
+# Node modules
 node_modules/
 
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Auth cache do whatsapp-web.js
+.wwebjs_auth/
+.wwebjs_cache/
+
+# Arquivos de ambiente
 .env
+
+# Relatórios / caches / builds
+*.log
+*.tmp
+.DS_Store
+dist/
+coverage/
+
+# VSCode
+.vscode/
