@@ -7,10 +7,10 @@ const cron = require('node-cron');
 const Gasto = require('./models/Gasto');
 const Categoria = require('./models/Categoria');
 
-// ⚡ Cole aqui o ID do grupo que apareceu no console
-const ALLOWED_GROUP_ID = "120363420189472861@g.us";
+// ID do grupo (vem do .env)
+const ALLOWED_GROUP_ID = process.env.GROUP_ID;
 
-// Conexão MongoDB
+// Conexão com MongoDB
 mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log('📦 Conectado ao MongoDB!'))
     .catch(err => console.error('❌ Erro MongoDB:', err));
@@ -18,141 +18,133 @@ mongoose.connect(process.env.MONGO_URI)
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
-        headless: false,
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
-    }
+        headless: true,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--disable-gpu'
+        ]
+    },
+    takeoverOnConflict: true,
+    bypassCSP: true,
+    webVersionCache: {} // garante mensagens próprias
 });
 
 client.on('qr', qr => qrcode.generate(qr, { small: true }));
 client.on('ready', () => console.log('✅ Bot conectado ao WhatsApp!'));
 
-// 📌 Usando message_create para capturar mensagens de todos (inclusive você)
-client.on('message_create', async (msg) => {
-    try {
-        const chat = await msg.getChat();
+client.on('message', async (message) => {
+    const chat = await message.getChat();
 
-        // Log no console
-        console.log(`📩 Chat: ${chat.name} - ID: ${chat.id._serialized} - Msg: ${msg.body}`);
+    // Ignora mensagens fora do grupo permitido
+    if (chat.id._serialized !== ALLOWED_GROUP_ID) return;
 
-        // Filtra pelo grupo correto
-        if (!chat.isGroup || chat.id._serialized !== ALLOWED_GROUP_ID) {
-            return; // Ignora tudo fora do grupo permitido
+    const msg = message.body.trim().toLowerCase();
+
+    console.log(`📩 Mensagem recebida: ${message.body}`);
+
+    // === Comandos ===
+    if (msg === '/help') {
+        return message.reply(
+            `📌 *Lista de Comandos*\n\n` +
+            `/add-categoria <nome> <limite> - Adiciona nova categoria\n` +
+            `/altera-valor-limite <nome> <novo_valor> - Altera limite de uma categoria\n` +
+            `/ping - Testa se o bot está online\n` +
+            `/reset - Reseta todos os gastos\n` +
+            `/rmv-categoria <nome> - Remove uma categoria\n` +
+            `/saldo - Mostra saldo restante por categoria`
+        );
+    }
+
+    if (msg === '/ping') {
+        return message.reply('🏓 Pong!');
+    }
+
+    if (msg.startsWith('/add-categoria')) {
+        const parts = message.body.split(' ');
+        if (parts.length < 3) {
+            return message.reply('❌ Uso correto: /add-categoria <nome> <limite>');
         }
+        const nome = parts[1].toLowerCase();
+        const limite = parseFloat(parts[2]);
+        if (isNaN(limite)) return message.reply('❌ O limite deve ser um número.');
 
-        const texto = msg.body.trim();
-        const partes = texto.split(' ');
-        const comando = partes[0].toLowerCase();
-        const args = partes.slice(1);
+        const existe = await Categoria.findOne({ nome });
+        if (existe) return message.reply(`⚠️ Categoria "${nome}" já existe.`);
 
-        // -----------------------
-        // Comandos
-        // -----------------------
+        await Categoria.create({ nome, limite });
+        return message.reply(`✅ Categoria "${nome}" criada com limite de R$${limite.toFixed(2)}`);
+    }
 
-        if (comando === '/ping') {
-            return msg.reply('🏓 Pong! Bot online.');
+    if (msg.startsWith('/altera-valor-limite')) {
+        const parts = message.body.split(' ');
+        if (parts.length < 3) {
+            return message.reply('❌ Uso correto: /altera-valor-limite <nome> <novo_valor>');
         }
+        const nome = parts[1].toLowerCase();
+        const novoLimite = parseFloat(parts[2]);
+        if (isNaN(novoLimite)) return message.reply('❌ O valor deve ser um número.');
 
-        if (comando === '/saldo') {
-            const categorias = await Categoria.find();
-            if (categorias.length === 0) {
-                return msg.reply('⚠️ Nenhuma categoria cadastrada. Use /add-categoria.');
+        const categoria = await Categoria.findOne({ nome });
+        if (!categoria) return message.reply(`⚠️ Categoria "${nome}" não encontrada.`);
+
+        categoria.limite = novoLimite;
+        await categoria.save();
+        return message.reply(`✅ Limite da categoria "${nome}" atualizado para R$${novoLimite.toFixed(2)}`);
+    }
+
+    if (msg.startsWith('/rmv-categoria')) {
+        const parts = message.body.split(' ');
+        if (parts.length < 2) {
+            return message.reply('❌ Uso correto: /rmv-categoria <nome>');
+        }
+        const nome = parts[1].toLowerCase();
+        const categoria = await Categoria.findOneAndDelete({ nome });
+
+        if (!categoria) return message.reply(`⚠️ Categoria "${nome}" não encontrada.`);
+        return message.reply(`🗑️ Categoria "${nome}" removida com sucesso.`);
+    }
+
+    if (msg === '/saldo') {
+        const categorias = await Categoria.find();
+        if (categorias.length === 0) return message.reply('⚠️ Nenhuma categoria encontrada.');
+
+        let resposta = '📊 *Saldo por Categoria:*\n\n';
+        for (const categoria of categorias) {
+            const gastos = await Gasto.find({ categoria: categoria.nome });
+            const total = gastos.reduce((acc, g) => acc + g.valor, 0);
+            const restante = categoria.limite - total;
+            resposta += `• ${categoria.nome}: R$${restante.toFixed(2)} restantes (Limite: R$${categoria.limite})\n`;
+        }
+        return message.reply(resposta);
+    }
+
+    if (msg === '/reset') {
+        await Gasto.deleteMany({});
+        return message.reply('🔄 Todos os gastos foram resetados.');
+    }
+
+    // Registro de gastos sem comando
+    const parts = message.body.split(' ');
+    if (parts.length === 2) {
+        const categoriaNome = parts[0].toLowerCase();
+        const valor = parseFloat(parts[1]);
+
+        if (!isNaN(valor)) {
+            const categoria = await Categoria.findOne({ nome: categoriaNome });
+            if (!categoria) {
+                return message.reply(`⚠️ Categoria "${categoriaNome}" não encontrada. Use /add-categoria primeiro.`);
             }
 
-            let resposta = '📌 *Saldo Atual:*\n';
-            for (let cat of categorias) {
-                const gastos = await Gasto.aggregate([
-                    { $match: { categoria: cat.nome } },
-                    { $group: { _id: null, total: { $sum: "$valor" } } }
-                ]);
-                const total = gastos[0]?.total || 0;
-                const saldo = cat.limite - total;
-                resposta += `- ${cat.nome}: R$${saldo} restante (gasto R$${total}, limite R$${cat.limite})\n`;
-            }
-            return msg.reply(resposta);
+            await Gasto.create({ categoria: categoria.nome, valor });
+            return message.reply(`✅ Gasto de R$${valor.toFixed(2)} registrado em "${categoriaNome}".`);
         }
-
-        if (comando === '/reset') {
-            await Gasto.deleteMany({});
-            return msg.reply('🔄 Todos os registros apagados! Novo mês iniciado.');
-        }
-
-        if (comando === '/add-categoria') {
-            if (args.length < 2) {
-                return msg.reply('❌ Uso: /add-categoria <nome> <limite>');
-            }
-            const nome = args[0].toLowerCase();
-            const limite = parseFloat(args[1]);
-            if (isNaN(limite)) return msg.reply('❌ O limite precisa ser um número.');
-
-            try {
-                await Categoria.create({ nome, limite });
-                return msg.reply(`✅ Categoria "${nome}" criada com limite R$${limite}`);
-            } catch (err) {
-                return msg.reply(`⚠️ Categoria "${nome}" já existe.`);
-            }
-        }
-
-        if (comando === '/rmv-categoria') {
-            if (args.length < 1) return msg.reply('❌ Uso: /rmv-categoria <nome>');
-            const nome = args[0].toLowerCase();
-            const result = await Categoria.deleteOne({ nome });
-            if (result.deletedCount > 0) {
-                return msg.reply(`✅ Categoria "${nome}" removida.`);
-            } else {
-                return msg.reply(`⚠️ Categoria "${nome}" não encontrada.`);
-            }
-        }
-
-        if (comando === '/altera-valor-limite') {
-            if (args.length < 2) return msg.reply('❌ Uso: /altera-valor-limite <nome> <novoLimite>');
-            const nome = args[0].toLowerCase();
-            const novoLimite = parseFloat(args[1]);
-            if (isNaN(novoLimite)) return msg.reply('❌ O novo limite precisa ser um número.');
-
-            const categoria = await Categoria.findOne({ nome });
-            if (!categoria) return msg.reply(`⚠️ Categoria "${nome}" não encontrada.`);
-
-            categoria.limite = novoLimite;
-            await categoria.save();
-            return msg.reply(`✅ Limite da categoria "${nome}" atualizado para R$${novoLimite}`);
-        }
-
-        // -----------------------
-        // Registro de gasto sem /
-        // -----------------------
-        if (!texto.startsWith('/')) {
-            if (partes.length === 2) {
-                const categoriaNome = partes[0].toLowerCase();
-                const valor = parseFloat(partes[1]);
-                const categoria = await Categoria.findOne({ nome: categoriaNome });
-
-                if (categoria && !isNaN(valor)) {
-                    await Gasto.create({ categoria: categoriaNome, valor });
-
-                    const gastos = await Gasto.aggregate([
-                        { $match: { categoria: categoriaNome } },
-                        { $group: { _id: null, total: { $sum: "$valor" } } }
-                    ]);
-                    const total = gastos[0]?.total || 0;
-                    const saldo = categoria.limite - total;
-
-                    return msg.reply(
-                        `✅ Registrado: ${categoriaNome} R$${valor}\n` +
-                        `📊 Total gasto: R$${total}\n` +
-                        `💰 Saldo restante: R$${saldo}`
-                    );
-                } else {
-                    return msg.reply(`⚠️ Categoria "${categoriaNome}" não encontrada. Use /add-categoria primeiro.`);
-                }
-            }
-        }
-
-    } catch (err) {
-        console.error("❌ Erro ao processar mensagem:", err);
     }
 });
 
-// Reset automático todo dia 1
+// Reset automático no dia 1
 cron.schedule('0 0 1 * *', async () => {
     await Gasto.deleteMany({});
     console.log('🔄 Reset mensal executado.');
