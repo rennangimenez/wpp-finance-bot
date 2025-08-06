@@ -2,13 +2,11 @@ require('dotenv').config();
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const mongoose = require('mongoose');
-const cron = require('node-cron');
 
 const Gasto = require('./models/Gasto');
 const Categoria = require('./models/Categoria');
 
-// ID do grupo (vem do .env)
-const ALLOWED_GROUP_ID = process.env.GROUP_ID;
+const ALLOWED_GROUP_ID = "120363420189472861@g.us";
 
 // Conexão com MongoDB
 mongoose.connect(process.env.MONGO_URI)
@@ -18,136 +16,221 @@ mongoose.connect(process.env.MONGO_URI)
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
-        headless: true,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--disable-gpu'
-        ]
-    },
-    takeoverOnConflict: true,
-    bypassCSP: true,
-    webVersionCache: {} // garante mensagens próprias
+        headless: false,
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+    }
 });
 
+// Exibir QR Code
 client.on('qr', qr => qrcode.generate(qr, { small: true }));
 client.on('ready', () => console.log('✅ Bot conectado ao WhatsApp!'));
+client.on('disconnected', () => console.log('⚠️ Bot desconectado do WhatsApp!'));
 
-client.on('message', async (message) => {
+// Escutar TODAS mensagens, inclusive as suas
+client.on('message_create', async (message) => {
     const chat = await message.getChat();
 
-    // Ignora mensagens fora do grupo permitido
     if (chat.id._serialized !== ALLOWED_GROUP_ID) return;
 
     const msg = message.body.trim().toLowerCase();
+    console.log(`📩 Mensagem recebida: ${msg} (de ${message.fromMe ? "VOCÊ" : "outra pessoa"})`);
 
-    console.log(`📩 Mensagem recebida: ${message.body}`);
+    switch (true) {
+        case msg === '/help':
+            message.reply(
+                `📌 *Lista de comandos disponíveis:*\n\n` +
+                `- 📂 /add-categoria [nome] [limite] → Adiciona nova categoria com limite\n` +
+                `- ➕ /add-gasto [valor] [categoria] → Registra um gasto\n` +
+                `- ✏️ /altera-valor-limite [categoria] [novoValor] → Altera o limite da categoria\n` +
+                `- ❓ /help → Mostra esta lista de comandos\n` +
+                `- 📋 /listar-categorias → Lista todas as categorias\n` +
+                `- 🏓 /ping → Testa se o bot está online\n` +
+                `- 🔄 /reset-mes → Apaga todos os gastos do mês\n` +
+                `- 🗑️ /rmv-categoria [categoria] → Remove uma categoria\n` +
+                `- 🗑️ /rmv-gasto [valor] [categoria] → Remove um gasto\n` +
+                `- 📊 /saldo [categoria] → Mostra o saldo disponível na categoria\n` +
+                `- 💰 /total → Mostra o total de gastos`
+            );
+            break;
 
-    // === Comandos ===
-    if (msg === '/help') {
-        return message.reply(
-            `📌 *Lista de Comandos*\n\n` +
-            `/add-categoria <nome> <limite> - Adiciona nova categoria\n` +
-            `/altera-valor-limite <nome> <novo_valor> - Altera limite de uma categoria\n` +
-            `/ping - Testa se o bot está online\n` +
-            `/reset - Reseta todos os gastos\n` +
-            `/rmv-categoria <nome> - Remove uma categoria\n` +
-            `/saldo - Mostra saldo restante por categoria`
-        );
-    }
+        case msg === '/ping':
+            message.reply('🏓 Pong! Estou online!');
+            break;
 
-    if (msg === '/ping') {
-        return message.reply('🏓 Pong!');
-    }
+        case msg === '/total':
+            const gastos = await Gasto.find();
+            if (!gastos.length) {
+                message.reply('⚠️ Nenhum gasto registrado ainda.');
+            } else {
+                const total = gastos.reduce((acc, g) => acc + g.valor, 0);
+                message.reply(
+                    `💰 *Resumo Geral dos Gastos*\n\n` +
+                    `💸 Total gasto até agora: *R$ ${total.toFixed(2)}*`
+                );
+            }
+            break;
 
-    if (msg.startsWith('/add-categoria')) {
-        const parts = message.body.split(' ');
-        if (parts.length < 3) {
-            return message.reply('❌ Uso correto: /add-categoria <nome> <limite>');
-        }
-        const nome = parts[1].toLowerCase();
-        const limite = parseFloat(parts[2]);
-        if (isNaN(limite)) return message.reply('❌ O limite deve ser um número.');
+        case msg === '/listar-categorias':
+            const categorias = await Categoria.find();
+            if (!categorias.length) {
+                message.reply('⚠️ Nenhuma categoria cadastrada.');
+            } else {
+                const lista = categorias.map(c => 
+                    `📂 *${c.nome}* → Limite: R$ ${c.limite.toFixed(2)}`
+                ).join('\n\n');
+                message.reply(`📋 *Categorias Cadastradas:*\n\n${lista}`);
+            }
+            break;
 
-        const existe = await Categoria.findOne({ nome });
-        if (existe) return message.reply(`⚠️ Categoria "${nome}" já existe.`);
+        case msg === '/reset-mes':
+            await Gasto.deleteMany({});
+            message.reply('🔄 Todos os gastos foram resetados para este mês.');
+            break;
 
-        await Categoria.create({ nome, limite });
-        return message.reply(`✅ Categoria "${nome}" criada com limite de R$${limite.toFixed(2)}`);
-    }
+        default:
+            if (msg.startsWith('/add-categoria')) {
+                const args = message.body.split(' ').slice(1);
+                const nome = args[0];
+                const limite = parseFloat(args[1]);
 
-    if (msg.startsWith('/altera-valor-limite')) {
-        const parts = message.body.split(' ');
-        if (parts.length < 3) {
-            return message.reply('❌ Uso correto: /altera-valor-limite <nome> <novo_valor>');
-        }
-        const nome = parts[1].toLowerCase();
-        const novoLimite = parseFloat(parts[2]);
-        if (isNaN(novoLimite)) return message.reply('❌ O valor deve ser um número.');
+                if (!nome || isNaN(limite)) {
+                    message.reply('⚠️ Uso correto: /add-categoria [nome] [limite]');
+                    return;
+                }
 
-        const categoria = await Categoria.findOne({ nome });
-        if (!categoria) return message.reply(`⚠️ Categoria "${nome}" não encontrada.`);
-
-        categoria.limite = novoLimite;
-        await categoria.save();
-        return message.reply(`✅ Limite da categoria "${nome}" atualizado para R$${novoLimite.toFixed(2)}`);
-    }
-
-    if (msg.startsWith('/rmv-categoria')) {
-        const parts = message.body.split(' ');
-        if (parts.length < 2) {
-            return message.reply('❌ Uso correto: /rmv-categoria <nome>');
-        }
-        const nome = parts[1].toLowerCase();
-        const categoria = await Categoria.findOneAndDelete({ nome });
-
-        if (!categoria) return message.reply(`⚠️ Categoria "${nome}" não encontrada.`);
-        return message.reply(`🗑️ Categoria "${nome}" removida com sucesso.`);
-    }
-
-    if (msg === '/saldo') {
-        const categorias = await Categoria.find();
-        if (categorias.length === 0) return message.reply('⚠️ Nenhuma categoria encontrada.');
-
-        let resposta = '📊 *Saldo por Categoria:*\n\n';
-        for (const categoria of categorias) {
-            const gastos = await Gasto.find({ categoria: categoria.nome });
-            const total = gastos.reduce((acc, g) => acc + g.valor, 0);
-            const restante = categoria.limite - total;
-            resposta += `• ${categoria.nome}: R$${restante.toFixed(2)} restantes (Limite: R$${categoria.limite})\n`;
-        }
-        return message.reply(resposta);
-    }
-
-    if (msg === '/reset') {
-        await Gasto.deleteMany({});
-        return message.reply('🔄 Todos os gastos foram resetados.');
-    }
-
-    // Registro de gastos sem comando
-    const parts = message.body.split(' ');
-    if (parts.length === 2) {
-        const categoriaNome = parts[0].toLowerCase();
-        const valor = parseFloat(parts[1]);
-
-        if (!isNaN(valor)) {
-            const categoria = await Categoria.findOne({ nome: categoriaNome });
-            if (!categoria) {
-                return message.reply(`⚠️ Categoria "${categoriaNome}" não encontrada. Use /add-categoria primeiro.`);
+                await Categoria.create({ nome, limite });
+                message.reply(`✅ Categoria *${nome}* criada com limite de R$ ${limite.toFixed(2)}!`);
+                return;
             }
 
-            await Gasto.create({ categoria: categoria.nome, valor });
-            return message.reply(`✅ Gasto de R$${valor.toFixed(2)} registrado em "${categoriaNome}".`);
-        }
-    }
-});
+            if (msg.startsWith('/add-gasto')) {
+                const args = message.body.split(' ').slice(1);
+                const valor = parseFloat(args[0]);
+                const categoriaNome = args.slice(1).join(' ');
 
-// Reset automático no dia 1
-cron.schedule('0 0 1 * *', async () => {
-    await Gasto.deleteMany({});
-    console.log('🔄 Reset mensal executado.');
+                if (isNaN(valor) || !categoriaNome) {
+                    message.reply('⚠️ Uso correto: /add-gasto [valor] [categoria]');
+                    return;
+                }
+
+                const categoria = await Categoria.findOne({ nome: categoriaNome });
+                if (!categoria) {
+                    message.reply(`⚠️ Categoria "${categoriaNome}" não encontrada. Use /listar-categorias`);
+                    return;
+                }
+
+                await Gasto.create({ valor, categoria: categoriaNome });
+
+                // Calcular total gasto nessa categoria
+                const gastosCategoria = await Gasto.find({ categoria: categoriaNome });
+                const totalGasto = gastosCategoria.reduce((acc, g) => acc + g.valor, 0);
+
+                message.reply(`✅ Gasto de R$ ${valor.toFixed(2)} registrado em *${categoriaNome}*.`);
+
+                // ALERTA caso ultrapasse o limite
+                if (totalGasto > categoria.limite) {
+                    const excedente = totalGasto - categoria.limite;
+                    message.reply(
+                        `🚨 *${categoria.nome.toUpperCase()}*\n\n` +
+                        `⚠️ O valor total planejado para esta categoria foi ultrapassado!!\n\n` +
+                        `💰 Valor total: *R$ ${categoria.limite.toFixed(2)}*\n` +
+                        `💸 Valor gasto: *R$ ${totalGasto.toFixed(2)}*\n` +
+                        `❌ Valor excedente: *R$ ${excedente.toFixed(2)}*`
+                    );
+                }
+
+                return;
+            }
+
+            if (msg.startsWith('/rmv-gasto')) {
+                const args = message.body.split(' ').slice(1);
+                const valor = parseFloat(args[0]);
+                const categoriaNome = args.slice(1).join(' ');
+
+                if (isNaN(valor) || !categoriaNome) {
+                    message.reply('⚠️ Uso correto: /rmv-gasto [valor] [categoria]');
+                    return;
+                }
+
+                const gasto = await Gasto.findOneAndDelete({ valor, categoria: categoriaNome });
+                if (!gasto) {
+                    message.reply(`⚠️ Gasto de R$ ${valor} na categoria "${categoriaNome}" não encontrado.`);
+                    return;
+                }
+
+                message.reply(`🗑️ Gasto de R$ ${valor.toFixed(2)} removido da categoria *${categoriaNome}*.`);
+                return;
+            }
+
+            if (msg.startsWith('/rmv-categoria')) {
+                const args = message.body.split(' ').slice(1);
+                const categoriaNome = args.join(' ');
+
+                if (!categoriaNome) {
+                    message.reply('⚠️ Uso correto: /rmv-categoria [categoria]');
+                    return;
+                }
+
+                await Categoria.findOneAndDelete({ nome: categoriaNome });
+                await Gasto.deleteMany({ categoria: categoriaNome });
+                message.reply(`🗑️ Categoria *${categoriaNome}* e seus gastos foram removidos.`);
+                return;
+            }
+
+            if (msg.startsWith('/altera-valor-limite')) {
+                const args = message.body.split(' ').slice(1);
+                const categoriaNome = args[0];
+                const novoValor = parseFloat(args[1]);
+
+                if (!categoriaNome || isNaN(novoValor)) {
+                    message.reply('⚠️ Uso correto: /altera-valor-limite [categoria] [novoValor]');
+                    return;
+                }
+
+                const categoria = await Categoria.findOneAndUpdate(
+                    { nome: categoriaNome },
+                    { limite: novoValor },
+                    { new: true }
+                );
+
+                if (!categoria) {
+                    message.reply(`⚠️ Categoria "${categoriaNome}" não encontrada.`);
+                    return;
+                }
+
+                message.reply(`✏️ Limite da categoria *${categoriaNome}* atualizado para R$ ${novoValor.toFixed(2)}.`);
+                return;
+            }
+
+            if (msg.startsWith('/saldo')) {
+                const args = message.body.split(' ').slice(1);
+                const categoriaNome = args.join(' ');
+
+                if (!categoriaNome) {
+                    message.reply('⚠️ Uso correto: /saldo [categoria]');
+                    return;
+                }
+
+                const categoria = await Categoria.findOne({ nome: categoriaNome });
+                if (!categoria) {
+                    message.reply(`⚠️ Categoria "${categoriaNome}" não encontrada.`);
+                    return;
+                }
+
+                const gastos = await Gasto.find({ categoria: categoriaNome });
+                const totalGasto = gastos.reduce((acc, g) => acc + g.valor, 0);
+                const saldo = categoria.limite - totalGasto;
+
+                message.reply(
+                    `📊 *${categoria.nome.toUpperCase()}*\n\n` +
+                    `💰 Valor total: *R$ ${categoria.limite.toFixed(2)}*\n` +
+                    `💸 Total gasto: *R$ ${totalGasto.toFixed(2)}*\n` +
+                    `💳 Valor restante: *R$ ${saldo.toFixed(2)}*`
+                );
+                return;
+            }
+            break;
+    }
 });
 
 client.initialize();
