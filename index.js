@@ -49,7 +49,8 @@ client.on('message_create', async (message) => {
                 `- 🗑️ /rmv-categoria [categoria] → Remove uma categoria\n` +
                 `- 🗑️ /rmv-gasto [valor] [categoria] → Remove um gasto\n` +
                 `- 📊 /saldo [categoria] → Mostra o saldo disponível na categoria\n` +
-                `- 💰 /total → Mostra o total de gastos`
+                `- 💰 /total → Mostra o total de gastos\n` +
+                `- 📈 /total-categoria → Lista o total gasto por *cada* categoria (com avisos)`
             );
             break;
 
@@ -71,14 +72,49 @@ client.on('message_create', async (message) => {
             break;
 
         case msg === '/listar-categorias':
-            const categorias = await Categoria.find();
-            if (!categorias.length) {
-                message.reply('⚠️ Nenhuma categoria cadastrada.');
-            } else {
-                const lista = categorias.map(c => 
-                    `📂 *${c.nome}* → Limite: R$ ${c.limite.toFixed(2)}`
-                ).join('\n\n');
-                message.reply(`📋 *Categorias Cadastradas:*\n\n${lista}`);
+            {
+                const categorias = await Categoria.find().sort({ nome: 1 });
+                if (!categorias.length) {
+                    message.reply('⚠️ Nenhuma categoria cadastrada.');
+                } else {
+                    const lista = categorias.map(c =>
+                        `📂 *${c.nome}* → Limite: R$ ${c.limite.toFixed(2)}`
+                    ).join('\n\n');
+                    message.reply(`📋 *Categorias Cadastradas:*\n\n${lista}`);
+                }
+            }
+            break;
+
+        case msg === '/total-categoria':
+            {
+                const categorias = await Categoria.find().sort({ nome: 1 });
+                if (!categorias.length) {
+                    message.reply('⚠️ Nenhuma categoria cadastrada.');
+                    break;
+                }
+
+                let resposta = `📈 *Total por Categoria*\n\n`;
+                for (const c of categorias) {
+                    const gastosCat = await Gasto.find({ categoria: c.nome });
+                    const totalGasto = gastosCat.reduce((acc, g) => acc + g.valor, 0);
+
+                    // Emojis de status
+                    let status = '✅';
+                    if (totalGasto > c.limite) status = '🚨';        // passou do limite
+                    else if (totalGasto === c.limite) status = '⚠️'; // atingiu exatamente
+
+                    const diff = (c.limite - totalGasto).toFixed(2);
+                    const linha =
+                        `${status} *${c.nome.toUpperCase()}*\n` +
+                        `💸 Total gasto: *R$ ${totalGasto.toFixed(2)}*\n` +
+                        `💰 Limite: *R$ ${c.limite.toFixed(2)}*\n` +
+                        (totalGasto > c.limite
+                            ? `❌ Excedente: *R$ ${(totalGasto - c.limite).toFixed(2)}*`
+                            : `💳 Restante: *R$ ${diff}*`);
+                    resposta += linha + `\n\n`;
+                }
+
+                message.reply(resposta.trim());
             }
             break;
 
